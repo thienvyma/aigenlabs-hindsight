@@ -9,6 +9,10 @@ Upstream base:
 - Tag: `v0.8.4`
 - Commit: `92f433c90409636804c0797071a4abbe141f76c5`
 
+AigenLabs runtime tag:
+
+- Tag: `v0.8.4-aigenlabs.1`
+
 Local AigenLabs patch:
 
 - `hindsight-all/hindsight/embedded.py` accepts `codex_home` and maps it to
