@@ -11,7 +11,7 @@ Upstream base:
 
 AigenLabs runtime tag:
 
-- Tag: `v0.8.4-aigenlabs.1`
+- Tag: `v0.8.4-aigenlabs.3`
 
 Local AigenLabs patch:
 
@@ -19,6 +19,12 @@ Local AigenLabs patch:
   `CODEX_HOME`.
 - `hindsight-embed/hindsight_embed/daemon_embed_manager.py` forwards
   `CODEX_HOME` into the daemon subprocess environment.
+- `hindsight-api-slim/hindsight_api/engine/providers/codex_llm.py` routes
+  `strict_schema=True` through a forced `structured_response` tool call and
+  repairs invalid JSON escape sequences in the non-strict fallback.
+- `hindsight-api-slim/hindsight_api/pg0.py` verifies pg0's bundled pgvector
+  extension on startup and rebuilds pgvector locally with pg0's own `pg_config`
+  when the bundled `vector.so` is not loadable on the host.
 
 Purpose:
 
@@ -26,4 +32,5 @@ Purpose:
 - Allow AigenLabs to build/release a pinned runtime without depending on future
   upstream package availability or behavior drift.
 - Preserve native Hindsight behavior except for the bounded Codex OAuth home
-  bridge needed by AigenLabs Business OS memory.
+  bridge and Codex structured-output hardening needed by AigenLabs Business OS
+  memory.
