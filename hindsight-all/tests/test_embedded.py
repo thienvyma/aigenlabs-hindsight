@@ -21,6 +21,19 @@ import json
 from hindsight import HindsightEmbedded
 
 
+def test_embedded_accepts_codex_home_without_starting_daemon():
+    client = HindsightEmbedded(
+        profile="codex-home-config",
+        llm_provider="openai-codex",
+        llm_model="gpt-5.4-mini",
+        codex_home="/tmp/aigenlabs-codex-home",
+    )
+
+    assert not client.is_running
+    assert client.config["HINDSIGHT_API_LLM_PROVIDER"] == "openai-codex"
+    assert client.config["CODEX_HOME"] == "/tmp/aigenlabs-codex-home"
+
+
 @pytest.fixture(scope="session")
 def llm_config():
     """Get LLM configuration from environment (session-scoped)."""
