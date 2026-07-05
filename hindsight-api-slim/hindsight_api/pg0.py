@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
 from typing import TYPE_CHECKING
+from pathlib import Path
+from urllib.request import urlopen
 
 if TYPE_CHECKING:
     from pg0 import Pg0
@@ -12,6 +21,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_USERNAME = "hindsight"
 DEFAULT_PASSWORD = "hindsight"
 DEFAULT_DATABASE = "hindsight"
+DEFAULT_PGVECTOR_VERSION = "0.8.1"
+PGVECTOR_REPAIR_ENV = "HINDSIGHT_API_PG0_REPAIR_PGVECTOR"
+PGVECTOR_VERSION_ENV = "HINDSIGHT_API_PG0_PGVECTOR_VERSION"
+PGVECTOR_PROBE_TIMEOUT_SECONDS = 20
+PGVECTOR_BUILD_TIMEOUT_SECONDS = 240
+PGVECTOR_DOWNLOAD_TIMEOUT_SECONDS = 60
 
 
 class EmbeddedPostgres:
@@ -77,6 +92,12 @@ class EmbeddedPostgres:
                 # Get URI from pg0 (includes auto-assigned port)
                 uri = info.uri
                 logger.info(f"PostgreSQL started: {uri}")
+                await loop.run_in_executor(
+                    None,
+                    _ensure_pg0_pgvector_loadable,
+                    uri,
+                    info.version,
+                )
                 return uri
             except Exception as e:
                 last_error = str(e)
@@ -184,6 +205,146 @@ def parse_pg0_url(db_url: str) -> tuple[bool, str | None, int | None]:
             return True, url_part or "hindsight", None
 
     return False, None, None
+
+
+def _pg0_installation_root(version: str | None) -> Path | None:
+    version_text = str(version or "").strip()
+    if not version_text:
+        return None
+    return Path.home() / ".pg0" / "installation" / version_text
+
+
+def _pgvector_repair_enabled() -> bool:
+    return os.getenv(PGVECTOR_REPAIR_ENV, "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _ensure_pg0_pgvector_loadable(uri: str | None, version: str | None) -> None:
+    """Ensure pg0's bundled pgvector can load on this host.
+
+    Some pg0 Linux wheels bundle a PostgreSQL/pgvector binary built against a
+    newer glibc than Ubuntu 22.04 provides. PostgreSQL itself starts, then
+    migrations fail at ``CREATE EXTENSION vector``. Rebuilding pgvector against
+    pg0's own ``pg_config`` keeps the embedded database self-contained while
+    producing a ``vector.so`` compatible with the user's machine.
+    """
+
+    if not uri:
+        return
+    install_root = _pg0_installation_root(version)
+    if install_root is None:
+        return
+    if not (install_root / "bin" / _executable_name("psql")).exists():
+        return
+
+    try:
+        _probe_pgvector_extension(install_root, uri)
+        return
+    except Exception as exc:
+        if not _pgvector_repair_enabled():
+            raise
+        logger.warning(
+            "pg0 pgvector extension failed to load; rebuilding local pgvector "
+            "for this host (%s)",
+            exc.__class__.__name__,
+        )
+
+    _rebuild_pgvector_for_pg0(install_root)
+    _probe_pgvector_extension(install_root, uri)
+    logger.info("pg0 pgvector extension verified after local rebuild")
+
+
+def _executable_name(name: str) -> str:
+    return f"{name}.exe" if sys.platform == "win32" else name
+
+
+def _probe_pgvector_extension(install_root: Path, uri: str) -> None:
+    psql = install_root / "bin" / _executable_name("psql")
+    result = subprocess.run(
+        [
+            str(psql),
+            uri,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            "CREATE EXTENSION IF NOT EXISTS vector",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=PGVECTOR_PROBE_TIMEOUT_SECONDS,
+        stdin=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(detail or "CREATE EXTENSION vector failed")
+
+
+def _rebuild_pgvector_for_pg0(install_root: Path) -> None:
+    pg_config = install_root / "bin" / _executable_name("pg_config")
+    if not pg_config.exists():
+        raise RuntimeError(f"pg0 pg_config not found: {pg_config}")
+    for tool in ("make", "cc"):
+        if shutil.which(tool) is None and (tool != "cc" or shutil.which("gcc") is None):
+            raise RuntimeError(
+                "pgvector rebuild requires build tools; install make and a C compiler"
+            )
+
+    version = os.getenv(PGVECTOR_VERSION_ENV, DEFAULT_PGVECTOR_VERSION).strip()
+    if not version:
+        version = DEFAULT_PGVECTOR_VERSION
+    with tempfile.TemporaryDirectory(prefix="hindsight-pgvector-") as temp_dir:
+        temp_path = Path(temp_dir)
+        source_dir = _download_pgvector_source(version, temp_path)
+        env = {**os.environ, "PG_CONFIG": str(pg_config)}
+        _run_make(source_dir, "clean", env=env, check=False)
+        _run_make(source_dir, env=env)
+        _run_make(source_dir, "install", env=env)
+
+
+def _download_pgvector_source(version: str, temp_path: Path) -> Path:
+    url = f"https://github.com/pgvector/pgvector/archive/refs/tags/v{version}.tar.gz"
+    with urlopen(url, timeout=PGVECTOR_DOWNLOAD_TIMEOUT_SECONDS) as response:
+        payload = response.read()
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        _safe_extract_tar(archive, temp_path)
+    source_dir = temp_path / f"pgvector-{version}"
+    if not source_dir.is_dir():
+        raise RuntimeError(f"pgvector source archive did not contain {source_dir.name}")
+    return source_dir
+
+
+def _safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in archive.getmembers():
+        target = (destination / member.name).resolve()
+        if target != destination and destination not in target.parents:
+            raise RuntimeError(f"unsafe path in pgvector source archive: {member.name}")
+    archive.extractall(destination)
+
+
+def _run_make(
+    source_dir: Path,
+    *args: str,
+    env: dict[str, str],
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        ["make", *args],
+        cwd=source_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=PGVECTOR_BUILD_TIMEOUT_SECONDS,
+        stdin=subprocess.DEVNULL,
+    )
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(detail or f"make {' '.join(args) or 'build'} failed")
+    return result
 
 
 async def resolve_database_url(db_url: str) -> str:

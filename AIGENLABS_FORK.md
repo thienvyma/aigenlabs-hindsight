@@ -11,7 +11,7 @@ Upstream base:
 
 AigenLabs runtime tag:
 
-- Tag: `v0.8.4-aigenlabs.2`
+- Tag: `v0.8.4-aigenlabs.3`
 
 Local AigenLabs patch:
 
@@ -22,6 +22,9 @@ Local AigenLabs patch:
 - `hindsight-api-slim/hindsight_api/engine/providers/codex_llm.py` routes
   `strict_schema=True` through a forced `structured_response` tool call and
   repairs invalid JSON escape sequences in the non-strict fallback.
+- `hindsight-api-slim/hindsight_api/pg0.py` verifies pg0's bundled pgvector
+  extension on startup and rebuilds pgvector locally with pg0's own `pg_config`
+  when the bundled `vector.so` is not loadable on the host.
 
 Purpose:
 
