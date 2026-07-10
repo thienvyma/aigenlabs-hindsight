@@ -827,12 +827,11 @@ async def retain_batch(
         if existing_text:
             # Prepend existing text as a new content item at the beginning
             existing_content: RetainContentDict = {"content": existing_text}
-            # Copy context/tags from first item for consistency
+            # The prepended item becomes the template for delta chunks. Preserve
+            # every retain field that affects extraction or consolidation, or new
+            # append facts silently lose their scope/metadata.
             first = contents_dicts[0]
-            if first.get("context"):
-                existing_content["context"] = first["context"]
-            if first.get("tags"):
-                existing_content["tags"] = first["tags"]
+            _copy_append_retain_fields(existing_content, first)
             contents_dicts = [existing_content, *contents_dicts]
             # Merge JSON arrays to keep original_text valid (#2409).
             # Without this, combined_content joins items with "\n", producing
@@ -843,17 +842,25 @@ async def retain_batch(
                 _merged = []
                 for _item in contents_dicts:
                     _parsed = json.loads(_item.get("content", ""))
-                    if isinstance(_parsed, list) and all(isinstance(_e, dict) for _e in _parsed):
-                        _merged.extend(_parsed)
-                    else:
+                    if not isinstance(_parsed, list):
                         _merged = None
                         break
+                    for _entry in _parsed:
+                        if isinstance(_entry, dict):
+                            _merged.append(_entry)
+                        elif isinstance(_entry, list) and all(isinstance(_message, dict) for _message in _entry):
+                            # AigenLabs/default providers batch each turn as an
+                            # inner message list. Flatten one conversation level.
+                            _merged.extend(_entry)
+                        else:
+                            _merged = None
+                            break
+                    if _merged is None:
+                        break
                 if _merged is not None:
-                    contents_dicts = [{"content": json.dumps(_merged, ensure_ascii=False)}]
-                    if first.get("context"):
-                        contents_dicts[0]["context"] = first["context"]
-                    if first.get("tags"):
-                        contents_dicts[0]["tags"] = first["tags"]
+                    merged_content: RetainContentDict = {"content": json.dumps(_merged, ensure_ascii=False)}
+                    _copy_append_retain_fields(merged_content, first)
+                    contents_dicts = [merged_content]
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
             # Rebuild contents list to match
@@ -2279,6 +2286,22 @@ async def _delta_metadata_only(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _copy_append_retain_fields(target: RetainContentDict, source: RetainContentDict) -> None:
+    """Copy fields that affect extraction, document metadata, or observations."""
+    if "context" in source:
+        target["context"] = source["context"]
+    if "event_date" in source:
+        target["event_date"] = source["event_date"]
+    if "metadata" in source:
+        target["metadata"] = source["metadata"]
+    if "entities" in source:
+        target["entities"] = source["entities"]
+    if "tags" in source:
+        target["tags"] = source["tags"]
+    if "observation_scopes" in source:
+        target["observation_scopes"] = source["observation_scopes"]
 
 
 def _build_contents(contents_dicts: list[RetainContentDict], document_tags: list[str] | None) -> list[RetainContent]:

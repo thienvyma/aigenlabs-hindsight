@@ -335,3 +335,111 @@ async def test_append_mode_conversation_arrays_produce_valid_json(memory, reques
 
     finally:
         await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_append_mode_preserves_shared_observation_scope_on_delta_facts(memory, request_context):
+    """Append must not move new facts out of the document's observation scope.
+
+    AigenLabs uses ``shared`` so corrections can update observations created by
+    earlier turns even though provenance tags change from turn to turn.
+    """
+    bank_id = f"test_append_scope_{_ts()}"
+    document_id = "conversation-append-shared-scope"
+
+    try:
+        await memory.retain_batch_async(
+            bank_id=bank_id,
+            contents=[
+                {
+                    "content": "HelioPilot Labs charges 2500 USD per month.",
+                    "tags": ["source:chat", "turn:first"],
+                    "observation_scopes": "shared",
+                }
+            ],
+            document_id=document_id,
+            request_context=request_context,
+        )
+
+        await memory.retain_batch_async(
+            bank_id=bank_id,
+            contents=[
+                {
+                    "content": "The current price is 3200 USD; 2500 USD is historical.",
+                    "tags": ["source:chat", "turn:second"],
+                    "observation_scopes": "shared",
+                    "update_mode": "append",
+                }
+            ],
+            document_id=document_id,
+            request_context=request_context,
+        )
+
+        doc = await memory.get_document(document_id, bank_id, request_context=request_context)
+        assert doc["observation_scopes"] == "shared"
+
+        async with memory._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT observation_scopes
+                FROM memory_units
+                WHERE bank_id = $1
+                  AND document_id = $2
+                  AND fact_type IN ('world', 'experience')
+                """,
+                bank_id,
+                document_id,
+            )
+
+        assert len(rows) >= 2
+        assert all(row["observation_scopes"] == '"shared"' for row in rows)
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_append_mode_flattens_provider_shaped_conversation_batches(memory, request_context):
+    """Default providers send one outer batch containing one message array."""
+    bank_id = f"test_append_nested_conv_{_ts()}"
+    document_id = "conversation-nested-json-append"
+
+    def _turn(user: str, assistant: str) -> str:
+        return json.dumps(
+            [
+                [
+                    {"role": "user", "content": user},
+                    {"role": "assistant", "content": assistant},
+                ]
+            ]
+        )
+
+    try:
+        await memory.retain_batch_async(
+            bank_id=bank_id,
+            contents=[{"content": _turn("Price?", "2500 USD"), "context": "conversation"}],
+            document_id=document_id,
+            request_context=request_context,
+        )
+        await memory.retain_batch_async(
+            bank_id=bank_id,
+            contents=[
+                {
+                    "content": _turn("Correction?", "3200 USD"),
+                    "context": "conversation",
+                    "update_mode": "append",
+                }
+            ],
+            document_id=document_id,
+            request_context=request_context,
+        )
+
+        doc = await memory.get_document(document_id, bank_id, request_context=request_context)
+        parsed = json.loads(doc["original_text"])
+        assert [message["role"] for message in parsed] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)

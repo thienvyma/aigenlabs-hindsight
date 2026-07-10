@@ -11,7 +11,7 @@ Upstream base:
 
 AigenLabs runtime tag:
 
-- Tag: `v0.8.4-aigenlabs.3`
+- Tag: `v0.8.4-aigenlabs.4`
 
 Local AigenLabs patch:
 
@@ -25,6 +25,10 @@ Local AigenLabs patch:
 - `hindsight-api-slim/hindsight_api/pg0.py` verifies pg0's bundled pgvector
   extension on startup and rebuilds pgvector locally with pg0's own `pg_config`
   when the bundled `vector.so` is not loadable on the host.
+- `hindsight-api-slim/hindsight_api/engine/retain/orchestrator.py` preserves
+  retain metadata and `observation_scopes` across delta append, and flattens the
+  nested conversation batches emitted by AigenLabs/default providers into one
+  valid JSON message array.
 
 Purpose:
 
