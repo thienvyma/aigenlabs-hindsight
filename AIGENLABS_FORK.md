@@ -11,7 +11,7 @@ Upstream base:
 
 AigenLabs runtime tag:
 
-- Tag: `v0.8.4-aigenlabs.4`
+- Tag: `v0.8.4-aigenlabs.5`
 
 Local AigenLabs patch:
 
@@ -29,6 +29,9 @@ Local AigenLabs patch:
   retain metadata and `observation_scopes` across delta append, and flattens the
   nested conversation batches emitted by AigenLabs/default providers into one
   valid JSON message array.
+- Delta document replacement invalidates observations derived from changed or
+  removed chunk facts and schedules native graph relinking before the chunk
+  cascade deletes those source facts.
 
 Purpose:
 

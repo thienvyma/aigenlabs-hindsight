@@ -2134,6 +2134,37 @@ async def _try_delta_retain(
                     for idx in changed_indices + removed_indices
                     if idx in existing_by_index
                 ]
+                outgoing_unit_rows = await conn.fetch(
+                    f"""
+                    SELECT id FROM {fq_table("memory_units")}
+                    WHERE bank_id = $1
+                      AND chunk_id = ANY($2::text[])
+                      AND fact_type IN ('experience', 'world')
+                    """,
+                    bank_id,
+                    chunks_to_delete,
+                )
+                outgoing_unit_ids = [row["id"] for row in outgoing_unit_rows]
+                if outgoing_unit_ids:
+                    invalidated = await fact_storage.delete_stale_observations_for_memories(
+                        conn,
+                        bank_id,
+                        outgoing_unit_ids,
+                        ops=pool.ops,
+                    )
+                    from ..graph_maintenance import enqueue_relink_victims
+
+                    await enqueue_relink_victims(
+                        conn,
+                        bank_id,
+                        [str(unit_id) for unit_id in outgoing_unit_ids],
+                        ops=pool.ops,
+                    )
+                    if invalidated:
+                        log_buffer.append(
+                            f"  Invalidated {invalidated} observation(s) derived "
+                            f"from {len(outgoing_unit_ids)} changed/removed chunk facts"
+                        )
                 await chunk_storage.delete_chunks_by_ids(conn, chunks_to_delete)
                 log_buffer.append(
                     f"  Deleted {len(chunks_to_delete)} chunks "

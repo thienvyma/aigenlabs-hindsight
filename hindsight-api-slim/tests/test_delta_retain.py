@@ -2,8 +2,11 @@
 Tests for delta retain — upsert optimization that only re-processes changed chunks.
 """
 
+import json
 import logging
+import uuid
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -226,6 +229,83 @@ async def test_delta_retain_modified_chunk(memory, request_context):
         all_texts = " ".join(r.text.lower() for r in result.results)
         assert "microsoft" in all_texts, f"Should have updated fact about Microsoft, got: {all_texts}"
 
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_delta_retain_deletes_observations_from_changed_chunks(memory, request_context):
+    """Changed-chunk source deletion must invalidate derived observations."""
+
+    bank_id = f"test_delta_observation_cleanup_{_ts()}"
+    document_id = "delta-observation-cleanup"
+    stable = "Riverstone glossary neutral reference. " * 75
+    old_content = json.dumps(
+        [
+            {"role": "user", "content": stable},
+            {"role": "user", "content": "Northglass milestone is OLD-4401."},
+        ]
+    )
+    new_content = json.dumps(
+        [
+            {"role": "user", "content": stable},
+            {"role": "user", "content": "Northglass milestone is NEW-5502."},
+        ]
+    )
+
+    try:
+        await memory.retain_async(
+            bank_id=bank_id,
+            content=old_content,
+            document_id=document_id,
+            request_context=request_context,
+        )
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            source_id = await conn.fetchval(
+                """
+                SELECT id FROM memory_units
+                WHERE bank_id = $1 AND document_id = $2
+                  AND fact_type IN ('world', 'experience')
+                  AND text LIKE '%OLD-4401%'
+                """,
+                bank_id,
+                document_id,
+            )
+            assert source_id is not None
+            observation_id = uuid.uuid4()
+            await conn.execute(
+                """
+                INSERT INTO memory_units
+                    (id, bank_id, text, fact_type, event_date,
+                     source_memory_ids, proof_count, created_at, updated_at)
+                VALUES ($1, $2, 'Northglass milestone is OLD-4401.',
+                        'observation', NOW(), $3, 1, NOW(), NOW())
+                """,
+                observation_id,
+                bank_id,
+                [source_id],
+            )
+
+        with patch.object(memory, "submit_async_consolidation", new=AsyncMock()):
+            await memory.retain_async(
+                bank_id=bank_id,
+                content=new_content,
+                document_id=document_id,
+                request_context=request_context,
+            )
+
+        async with pool.acquire() as conn:
+            old_source = await conn.fetchval(
+                "SELECT id FROM memory_units WHERE id = $1",
+                source_id,
+            )
+            stale_observation = await conn.fetchval(
+                "SELECT id FROM memory_units WHERE id = $1",
+                observation_id,
+            )
+        assert old_source is None
+        assert stale_observation is None
     finally:
         await memory.delete_bank(bank_id, request_context=request_context)
 
